@@ -1,13 +1,21 @@
 name: Kaitorishouten Scraper
 
+# fast / full の2モードを VPS cron から workflow_dispatch で発火する（GitHub schedule は間引かれるため）。
+#   fast : Phase 1(携帯AJAX+家電/カメラAJAX)+Phase 5(ゲーム/トレカ等)。約7分。30分ごと。
+#   full : 全フェーズ（+巨大な category/3 本体カタログ）。約22分。3時間ごと。
+# fast は前回 full の JSON に上書き合成する（非fastカテゴリは前回値を保持）。
+
 on:
-  schedule:
-    - cron: "*/30 * * * *"   # 30分ごと（実行時間が17〜25分のため15分では足りない）
-  workflow_dispatch:           # 手動実行
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "full or fast"
+        required: false
+        default: "full"
 
 concurrency:
   group: kaitorishouten
-  cancel-in-progress: false   # 実行中は次をキュー待機させる（30分周期だが実行に40分かかるため）
+  cancel-in-progress: false   # 実行中は次をキュー待機（fast/full が重なったら順番待ち）
 
 jobs:
   scrape:
@@ -27,23 +35,27 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run scraper
-        run: python run_kaitorishouten.py
+      - name: Clone Scanner repo (for base data and push)
+        env:
+          PAT: ${{ secrets.SCANNER_PAT }}
+        run: git clone --depth=1 https://kogekuma:$PAT@github.com/kogekuma/Scanner.git scanner_repo
+
+      - name: Run scraper (mode=${{ github.event.inputs.mode || 'full' }})
+        run: python run_kaitorishouten.py --mode "${{ github.event.inputs.mode || 'full' }}" --base scanner_repo/docs/data/kaitorishouten.json
 
       - name: Push to Scanner repo
         env:
           PAT: ${{ secrets.SCANNER_PAT }}
         run: |
           if [ ! -f kaitorishouten.json ]; then
-            echo "kaitorishouten.json が生成されていないためスキップ（接続失敗）"
+            echo "kaitorishouten.json が生成されていないためスキップ（失敗/0件/縮小ガード）"
             exit 0
           fi
-          git clone https://kogekuma:$PAT@github.com/kogekuma/Scanner.git scanner_repo
           cp kaitorishouten.json scanner_repo/docs/data/kaitorishouten.json
           cd scanner_repo
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/data/kaitorishouten.json
           git diff --cached --quiet || \
-            git commit -m "chore: update kaitorishouten data $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git commit -m "chore: update kaitorishouten data (${{ github.event.inputs.mode || 'full' }}) $(date -u '+%Y-%m-%d %H:%M UTC')"
           git push

@@ -305,8 +305,15 @@ class KaitorishoutenScraper(BaseScraper):
             page += 1
             _cat_sleep()
 
-    def scrape(self) -> dict:
-        """4フェーズでスキャンして JAN → 価格情報の辞書を返す。"""
+    def scrape(self, mode: str = "full") -> dict:
+        """フェーズごとにスキャンして JAN → 価格情報の辞書を返す。
+
+        mode:
+          "full" … 全フェーズ（Phase 1/5/6/3/4）。完全スナップショット。3時間ごとに実行。
+          "fast" … Phase 1（携帯AJAX＋家電/カメラAJAX）＋ Phase 5（ゲーム機/ソフト/トレカ等の
+                    kaden list_category）のみ。変動の速い商品を短時間で取得。15〜30分ごとに実行し、
+                    呼び出し側で前回 full の結果に上書き合成する（category/3・4・6 は前回値を保持）。
+        """
         results = {}
         lock = threading.Lock()
 
@@ -342,6 +349,11 @@ class KaitorishoutenScraper(BaseScraper):
                             flush=True,
                         )
         print(f"  Phase 5 after: {len(results)} JANs", flush=True)
+
+        # fast モードは Phase 1＋5 のみで終了（携帯・家電/カメラ・ゲーム/トレカの変動分だけ取得）
+        if mode == "fast":
+            print(f"[kaitorishouten] fast done: {len(results)} JANs", flush=True)
+            return results
 
         # ── Phase 6: nitiyouhin list_category（ウィスキー・日本酒・ワイン等を新規取得）──
         # sitemap の /category/3/{id} とは別系統（sitemap 経由では到達不可）。
