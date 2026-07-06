@@ -10,7 +10,9 @@ leaf 走査（run_morimori.py）と cat99 走査（run_morimori_cat99.py）は�
   --base <path> で既存 morimori.json（leaf+cat99 両方を含む最新版）を読み込み、
   今回 scope のシャードデータだけで上書き更新する。もう一方の scope の商品や、
   キャンセルされたシャードが担当していた商品はベースのまま維持される。
-  leaf と cat99 の JAN は実測上ほぼ重複しないが、衝突時は最高値を採用する。
+  今回スクレイプできた JAN は現在価格なので、値下げでも fresh を無条件採用する
+  （最高値保持だと値下げが永久に反映されず古い高値が固着するため）。
+  leaf と cat99 の JAN は実測上ほぼ重複しないが、衝突時は今回 scope（fresh）を優先する。
 """
 
 import argparse
@@ -60,10 +62,11 @@ for shard in range(args.shards):
     ok_shards += 1
     print(f"[merge:{args.scope}] shard {shard}: {data.get('count', 0)} JANs", flush=True)
 
-# Step 3: 今回 scope の結果でベースを上書き（衝突は最高値を採用）
-for jan, item in shard_merged.items():
-    if jan not in merged or item["price"] > merged[jan].get("price", -1):
-        merged[jan] = item
+# Step 3: 今回 scope の結果でベースを上書き。
+# 今回スクレイプできた JAN は「現在の買取価格」なので、値下げでも fresh を無条件採用する。
+# （最高値保持にすると価格が下がったときに永久に古い高値が残り続けるバグになる。
+#   未スクレイプの JAN＝もう一方の scope やキャンセルされたシャードの分は base のまま維持される。）
+merged.update(shard_merged)
 
 print(f"[merge:{args.scope}] {ok_shards}/{args.shards} シャード取り込み, "
       f"新規/更新 {len(shard_merged)} JANs, 合計 {len(merged)} JANs", flush=True)
