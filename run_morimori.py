@@ -72,6 +72,17 @@ args = parser.parse_args()
 
 scraper = MorimoriScraper()
 
+# 起動スタガー: 1ワークフローの20シャードが同時に /sitemap.xml を叩くと
+# サーバ側が一瞬で詰まり、何本かが ConnectTimeout で即死する（実測: 失敗 run の
+# ほぼ全てがこの sitemap 取得での死。シャードが丸ごと空振りする＝担当カテゴリが
+# その回は更新されない）。シャード番号ぶん開始をずらして山を崩す。
+# 1ワークフローは20シャードなので %20。既定3秒×19 = 最大57秒で14分窓に影響しない。
+STAGGER_SEC = float(os.environ.get("MORIMORI_STAGGER_SEC", "3"))
+stagger = (args.shard % 20) * STAGGER_SEC
+if stagger:
+    print(f"[morimori leaf shard {args.shard}] 起動を {stagger:.0f} 秒ずらします", flush=True)
+    time.sleep(stagger)
+
 # sitemap から全カテゴリを発見し、除外カテゴリ（cat99・冗長集約05）を外す。
 # _discover_categories は SITEMAP_MISSING を必ず union するため、SITEMAP カテゴリも
 # all_cats に含まれる。よって小さい SITEMAP カテゴリは通常 stride で、大きいもの

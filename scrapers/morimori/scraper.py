@@ -114,12 +114,12 @@ class MorimoriScraper(BaseScraper):
             raise MorimoriBlockedError(f"morimori blocked: HTTP {resp.status_code} {url}")
         return resp
 
-    def _get_with_retries(self, url: str, attempts: int = 2, **kwargs):
-        """403/429 はリトライせず、接続エラー等は短く（12秒）リトライする。
+    def _get_with_retries(self, url: str, attempts: int = 2, backoff: int = 12, **kwargs):
+        """403/429 はリトライせず、接続エラー等は短く（既定12秒）リトライする。
 
         各シャードは 14 分のタイムアウト窓で動くため、長い固定待ち（30/60/90秒）は
         budget を食い潰す。Codex 助言に従い通常ページは最大1リトライ・12秒に抑える。
-        sitemap のようにシャード全体の前提となるリクエストだけ attempts を増やす。
+        sitemap のようにシャード全体の前提となるリクエストだけ attempts / backoff を上げる。
         """
         last_error = None
         for attempt in range(attempts):
@@ -134,10 +134,11 @@ class MorimoriScraper(BaseScraper):
                 if attempt == attempts - 1:
                     break
                 print(
-                    f"  [morimori] request failed ({attempt + 1}/{attempts}): {exc} -> wait 12s",
+                    f"  [morimori] request failed ({attempt + 1}/{attempts}): {exc} "
+                    f"-> wait {backoff}s",
                     flush=True,
                 )
-                time.sleep(12)
+                time.sleep(backoff)
         raise last_error
 
     def _discover_categories(self) -> list[str]:
@@ -146,11 +147,13 @@ class MorimoriScraper(BaseScraper):
         /category/{id} は 7桁カテゴリのみ採用し、短い親カテゴリは除外する。
         /category/{id}/product/{product_id} 由来のカテゴリと検証済み例外はそのまま採用する。
 
-        sitemap の取得に失敗するとこのシャードは1件も取得できずに落ちる（実測: leaf-A の
-        失敗 run の大半が ConnectTimeout でここで死んでいた）ため、ここだけリトライを
-        4回に増やす。最悪でも +36 秒で 14 分窓を脅かさない。
+        sitemap の取得に失敗するとこのシャードは1件も取得できずに落ちる（実測: 失敗 run の
+        大半が ConnectTimeout でここで死んでいた）ため、ここだけ 4回・20秒間隔にする。
+        20シャードが同時に叩く＝サーバ側から見ると瞬間的な集中なので、呼び出し側で
+        シャード番号ぶんずらす（run_morimori.py の起動スタガー）のと合わせて効かせる。
+        最悪でも 4×15秒(connect timeout) + 3×20秒 ≒ 2分で 14分窓を脅かさない。
         """
-        resp = self._get_with_retries(BASE_URL + "/sitemap.xml", attempts=4)
+        resp = self._get_with_retries(BASE_URL + "/sitemap.xml", attempts=4, backoff=20)
         text = resp.text
 
         category_ids = set(re.findall(r"/category/(\d+)(?:[/?#<\s]|$)", text))
