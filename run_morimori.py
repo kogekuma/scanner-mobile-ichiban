@@ -70,6 +70,10 @@ parser.add_argument("--shard",        type=int, default=0, help="このジョブ
 parser.add_argument("--total-shards", type=int, default=1, help="シャード総数")
 args = parser.parse_args()
 
+# 走査予算はプロセス開始から測る。スタガー待ち・sitemap リトライ（最悪2分）を
+# 予算の外に置くと 57秒 + 2分 + 11.5分 = 14.4分 で結局ハードタイムアウトするため。
+STARTED_AT = time.monotonic()
+
 scraper = MorimoriScraper()
 
 # 起動スタガー: 1ワークフローの20シャードが同時に /sitemap.xml を叩くと
@@ -106,7 +110,7 @@ results: dict = {}
 lock = threading.Lock()
 
 # 走査予算（ハードタイムアウトの手前で自主的に打ち切る）を scraper に渡す。
-scraper.deadline = time.monotonic() + SHARD_BUDGET_MIN * 60
+scraper.deadline = STARTED_AT + SHARD_BUDGET_MIN * 60
 skipped: list[str] = []
 
 # 直列走査（サーバは高並列に耐えられないため、シャード内は1接続に保つ。
