@@ -20,7 +20,9 @@
 
 import argparse
 import json
+import os
 import threading
+import time
 from datetime import datetime, timezone, timedelta
 
 from scrapers.morimori import MorimoriScraper
@@ -31,7 +33,20 @@ JST = timezone(timedelta(hours=9))
 # leaf から除外するカテゴリ。
 #   99 = 全商品集約（別ワークフロー run_morimori_cat99.py が担当）
 #   05 = 冗長な集約カテゴリ（196ページ。サンプル新品100%が7桁leafでカバー済み＝除外可）
-EXCLUDE_FROM_LEAF = {AGGREGATE_CATEGORY, "05"}
+#   06 / 03 / 24 = 同じ「短縮ID＝親カテゴリ」の集約ページ（2026-08-24 追加）。
+#     sitemap の /category/{id}/product/{pid} 由来で短縮IDが混入し、担当シャードが
+#     14分窓を丸ごと食い潰していた（実測: 06 は180ページ超で shard 32 が毎回タイムアウト、
+#     直近100 run すべて未完＝その担当カテゴリが恒久的に未走査だった）。
+#     実測で冗長性を確認済み: 06=50件 / 03=34件 の標本すべてが 7桁leaf 経由で収録済み、
+#     24=18件は 7桁leaf または 2403/2404（走査対象として維持）経由で収録済み。
+#     ※ 短縮IDでも 0402/0505/0601/1801 等は1ページで固有商品を持つため除外しない。
+EXCLUDE_FROM_LEAF = {AGGREGATE_CATEGORY, "05", "06", "03", "24"}
+
+# 1シャードあたりの走査予算（分）。GitHub Actions の timeout-minutes(14) に達すると
+# ジョブが強制終了され「そのシャードのデータが1件も出ない」ため、少し手前で自主的に
+# 打ち切って部分結果を保存する。ハードタイムアウト（＝全損＋原因不明）を
+# 「部分データ＋警告」に変える安全弁。
+SHARD_BUDGET_MIN = float(os.environ.get("MORIMORI_SHARD_BUDGET_MIN", "11.5"))
 
 # 12ページ超の大カテゴリ（2026-07-01 実ログ実測ベース。中古込みの実ページ数）。
 # 1シャードに偏るとタイムアウトするため、ページ単位で全シャードに分散して負荷を均等化する。
@@ -79,15 +94,26 @@ print(
 results: dict = {}
 lock = threading.Lock()
 
+# 走査予算（ハードタイムアウトの手前で自主的に打ち切る）を scraper に渡す。
+scraper.deadline = time.monotonic() + SHARD_BUDGET_MIN * 60
+skipped: list[str] = []
+
 # 直列走査（サーバは高並列に耐えられないため、シャード内は1接続に保つ。
 # 並列化すると 20シャード×並列数の同時接続でサーバが過負荷になり全滅する）。
 try:
     # 1) 通常カテゴリ（担当分のみ・連続走査。小 SITEMAP カテゴリもここに含まれる）
-    for cat_id in my_normal:
+    for i, cat_id in enumerate(my_normal):
+        if scraper.past_deadline():
+            skipped.extend(my_normal[i:])
+            break
         scraper._scan_category(cat_id, results, lock)
 
     # 2) 大カテゴリ（ページ単位で全シャードに分散。大 SITEMAP もここで処理される）
-    for cat_id in sorted(big_set):
+    big_sorted = sorted(big_set)
+    for i, cat_id in enumerate(big_sorted):
+        if scraper.past_deadline():
+            skipped.extend(big_sorted[i:])
+            break
         scraper._scan_category_pages(
             cat_id, results, lock,
             page_start=args.shard + 1, page_step=args.total_shards,
@@ -98,13 +124,30 @@ except Exception as exc:
     print(f"[morimori leaf shard {args.shard}] 中断: {exc}", flush=True)
     raise SystemExit(1)
 
-print(f"[morimori leaf shard {args.shard}] 完了: {len(results)} JANs", flush=True)
+partial = bool(skipped) or scraper.deadline_hit
+if partial:
+    # GitHub Actions の run サマリに出る形式で警告する（黙って部分データになるのを防ぐ）。
+    # 恒久的に出続ける場合はカテゴリが大きくなりすぎている＝BIG_CATEGORIES 追加か
+    # EXCLUDE_FROM_LEAF 追加でシャードの担当量を減らすこと。
+    print(
+        f"::warning::[morimori leaf shard {args.shard}] 走査予算 {SHARD_BUDGET_MIN} 分を超過。"
+        f"未走査カテゴリ {len(skipped)} 件: {','.join(skipped[:20])}"
+        f"{' ...' if len(skipped) > 20 else ''}",
+        flush=True,
+    )
+
+print(
+    f"[morimori leaf shard {args.shard}] "
+    f"{'部分完了' if partial else '完了'}: {len(results)} JANs",
+    flush=True,
+)
 
 output = {
     "updated": datetime.now(JST).strftime("%Y-%m-%d %H:%M JST"),
     "shard":   args.shard,
     "scope":   "leaf",
     "count":   len(results),
+    "partial": partial,
     "items":   results,
 }
 

@@ -78,6 +78,18 @@ class MorimoriScraper(BaseScraper):
         self._rate_lock = threading.Lock()
         self._last_request_at = 0.0
         self._abort_event = threading.Event()
+        # 走査予算（time.monotonic() の絶対値）。None なら無制限。
+        # 呼び出し側（run_morimori.py 等）が設定すると、ページループが予算超過時点で
+        # 打ち切られ deadline_hit が立つ。ハードタイムアウトによる全損を防ぐための安全弁。
+        self.deadline = None
+        self.deadline_hit = False
+
+    def past_deadline(self) -> bool:
+        """走査予算を超過していれば True（超過を記録する）。"""
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            self.deadline_hit = True
+            return True
+        return False
 
     def _wait_global_rate_limit(self):
         """全スレッド共有で、任意の2リクエストの開始間隔を空ける。"""
@@ -102,14 +114,15 @@ class MorimoriScraper(BaseScraper):
             raise MorimoriBlockedError(f"morimori blocked: HTTP {resp.status_code} {url}")
         return resp
 
-    def _get_with_retries(self, url: str, **kwargs):
-        """403/429 はリトライせず、接続エラー等は1回だけ短く（12秒）リトライする。
+    def _get_with_retries(self, url: str, attempts: int = 2, **kwargs):
+        """403/429 はリトライせず、接続エラー等は短く（12秒）リトライする。
 
         各シャードは 14 分のタイムアウト窓で動くため、長い固定待ち（30/60/90秒）は
-        budget を食い潰す。Codex 助言に従い最大1リトライ・12秒に抑える。
+        budget を食い潰す。Codex 助言に従い通常ページは最大1リトライ・12秒に抑える。
+        sitemap のようにシャード全体の前提となるリクエストだけ attempts を増やす。
         """
         last_error = None
-        for attempt in range(2):
+        for attempt in range(attempts):
             try:
                 resp = self._request_once(url, **kwargs)
                 resp.raise_for_status()
@@ -118,9 +131,12 @@ class MorimoriScraper(BaseScraper):
                 raise
             except Exception as exc:
                 last_error = exc
-                if attempt == 1:
+                if attempt == attempts - 1:
                     break
-                print(f"  [morimori] request failed (1/2): {exc} -> wait 12s", flush=True)
+                print(
+                    f"  [morimori] request failed ({attempt + 1}/{attempts}): {exc} -> wait 12s",
+                    flush=True,
+                )
                 time.sleep(12)
         raise last_error
 
@@ -129,8 +145,12 @@ class MorimoriScraper(BaseScraper):
 
         /category/{id} は 7桁カテゴリのみ採用し、短い親カテゴリは除外する。
         /category/{id}/product/{product_id} 由来のカテゴリと検証済み例外はそのまま採用する。
+
+        sitemap の取得に失敗するとこのシャードは1件も取得できずに落ちる（実測: leaf-A の
+        失敗 run の大半が ConnectTimeout でここで死んでいた）ため、ここだけリトライを
+        4回に増やす。最悪でも +36 秒で 14 分窓を脅かさない。
         """
-        resp = self._get_with_retries(BASE_URL + "/sitemap.xml")
+        resp = self._get_with_retries(BASE_URL + "/sitemap.xml", attempts=4)
         text = resp.text
 
         category_ids = set(re.findall(r"/category/(\d+)(?:[/?#<\s]|$)", text))
@@ -252,6 +272,12 @@ class MorimoriScraper(BaseScraper):
         if page_step == 1:
             page = page_start
             while not self._abort_event.is_set():
+                if self.past_deadline():
+                    print(
+                        f"  [morimori] {cat_id} page={page} 以降を予算超過で打ち切り",
+                        flush=True,
+                    )
+                    break
                 params = {"page": page} if page > 1 else {}
                 try:
                     resp = self._get_with_retries(f"{BASE_URL}/category/{cat_id}", params=params)
@@ -281,6 +307,12 @@ class MorimoriScraper(BaseScraper):
 
         for page in range(page_start, last_page + 1, page_step):
             if self._abort_event.is_set():
+                break
+            if self.past_deadline():
+                print(
+                    f"  [morimori] {cat_id} page={page} 以降を予算超過で打ち切り",
+                    flush=True,
+                )
                 break
             params = {"page": page} if page > 1 else {}
             try:
