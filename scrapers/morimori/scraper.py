@@ -147,14 +147,31 @@ class MorimoriScraper(BaseScraper):
         /category/{id} は 7桁カテゴリのみ採用し、短い親カテゴリは除外する。
         /category/{id}/product/{product_id} 由来のカテゴリと検証済み例外はそのまま採用する。
 
-        sitemap の取得に失敗するとこのシャードは1件も取得できずに落ちる（実測: 失敗 run の
-        大半が ConnectTimeout でここで死んでいた）ため、ここだけ 4回・20秒間隔にする。
-        20シャードが同時に叩く＝サーバ側から見ると瞬間的な集中なので、呼び出し側で
-        シャード番号ぶんずらす（run_morimori.py の起動スタガー）のと合わせて効かせる。
-        最悪でも 4×15秒(connect timeout) + 3×20秒 ≒ 2分で 14分窓を脅かさない。
+        sitemap の取得に失敗するとこのシャードは1件も取得できずに落ちる（実測: 除外修正後に
+        残った失敗は 100% がここの ConnectTimeout。1 run につき1シャードが空振りしていた）。
+        そこで三段構えにする:
+          1. ここだけリトライ 4回・20秒間隔（最悪 4×15秒 + 3×20秒 ≒ 2分）
+          2. 20シャードの同時アクセスを崩す起動スタガー（run_morimori.py 側）
+          3. それでも駄目なら categories_fallback.json（同じ抽出規則で作った一覧）で継続。
+             カテゴリ一覧は日単位ではほぼ変わらないので、シャードを丸ごと落とすより
+             少し古い一覧で走査したほうが取りこぼしが小さい。
         """
-        resp = self._get_with_retries(BASE_URL + "/sitemap.xml", attempts=4, backoff=20)
-        text = resp.text
+        try:
+            text = self._get_with_retries(
+                BASE_URL + "/sitemap.xml", attempts=4, backoff=20
+            ).text
+        except MorimoriBlockedError:
+            raise
+        except Exception as exc:
+            fallback = self._load_fallback_categories()
+            if not fallback:
+                raise
+            print(
+                f"::warning::[morimori] sitemap 取得に失敗（{exc}）。"
+                f"categories_fallback.json の {len(fallback)} 件で継続します",
+                flush=True,
+            )
+            return fallback
 
         category_ids = set(re.findall(r"/category/(\d+)(?:[/?#<\s]|$)", text))
         seven_digit_ids = {cat for cat in category_ids if re.fullmatch(r"\d{7}", cat)}
@@ -175,6 +192,20 @@ class MorimoriScraper(BaseScraper):
             flush=True,
         )
         return ordered
+
+    def _load_fallback_categories(self) -> list[str]:
+        """sitemap が取れないときのカテゴリ一覧スナップショットを読む。
+
+        更新方法: `python tools/dump_morimori_categories.py`（sitemap から同じ規則で再生成）。
+        新カテゴリはスナップショットに無いが、これが使われるのは sitemap 障害時だけなので
+        「1シャード全損」より軽い。使われたら ::warning:: がランサマリに出る。
+        """
+        path = Path(__file__).with_name("categories_fallback.json")
+        try:
+            return list(json.loads(path.read_text(encoding="utf-8")).get("categories", []))
+        except Exception as exc:
+            print(f"  [morimori] fallback カテゴリ一覧を読めません: {exc}", flush=True)
+            return []
 
     def _load_known_nonempty_categories(self) -> set[str]:
         """既存 morimori.json の URL から前回商品ありカテゴリを導出する（bg-worker では空）。"""
