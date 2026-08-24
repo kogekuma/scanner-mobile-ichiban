@@ -45,6 +45,8 @@ if args.base:
 shard_merged = {}
 updated = ""
 ok_shards = 0
+missing_shards = []   # ファイルなし＝そのシャードは丸ごと空振り（担当カテゴリが更新されない）
+partial_shards = []   # 走査予算オーバーで途中打ち切り
 
 for shard in range(args.shards):
     filename = f"{prefix}{shard}.json"
@@ -53,6 +55,7 @@ for shard in range(args.shards):
             data = json.load(f)
     except FileNotFoundError:
         print(f"[merge:{args.scope}] shard {shard}: ファイルなし（スキップ）", flush=True)
+        missing_shards.append(shard)
         continue
 
     for jan, item in data.get("items", {}).items():
@@ -60,7 +63,22 @@ for shard in range(args.shards):
             shard_merged[jan] = item
     updated = data.get("updated", "") or updated
     ok_shards += 1
-    print(f"[merge:{args.scope}] shard {shard}: {data.get('count', 0)} JANs", flush=True)
+    if data.get("partial"):
+        partial_shards.append(shard)
+    print(
+        f"[merge:{args.scope}] shard {shard}: {data.get('count', 0)} JANs"
+        f"{'（部分）' if data.get('partial') else ''}",
+        flush=True,
+    )
+
+# 欠けたシャードは「そのカテゴリだけ静かに古くなる」ので run サマリに出す。
+# （merge は if: always() なので他シャードは反映され、run の赤/緑では判別できない）
+if missing_shards:
+    print(f"::warning::[merge:{args.scope}] データ無しシャード {len(missing_shards)} 本: "
+          f"{missing_shards} — 担当カテゴリは前回値のまま", flush=True)
+if partial_shards:
+    print(f"::warning::[merge:{args.scope}] 予算超過で部分取得のシャード {len(partial_shards)} 本: "
+          f"{partial_shards}", flush=True)
 
 # Step 3: 今回 scope の結果でベースを上書き。
 # 今回スクレイプできた JAN は「現在の買取価格」なので、値下げでも fresh を無条件採用する。
