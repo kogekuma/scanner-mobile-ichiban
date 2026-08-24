@@ -26,7 +26,19 @@ parser.add_argument("--base", help="既存 morimori.json のパス（フォー�
 parser.add_argument("--scope", choices=["leaf", "cat99"], default="leaf",
                     help="取り込むシャードの種別")
 parser.add_argument("--shards", type=int, default=10, help="シャード総数")
+parser.add_argument(
+    "--expect", default=None,
+    help="このワークフローが生成するはずのシャード範囲 'start-end'（例 20-39）。"
+         "leaf は A(0-19)/B(20-39) で半分ずつ動くので、指定が無いと"
+         "もう一方の20本を『欠損』と誤検知する。省略時は全シャードを期待値とする。",
+)
 args = parser.parse_args()
+
+if args.expect:
+    _s, _, _e = args.expect.partition("-")
+    expected_shards = set(range(int(_s), int(_e or _s) + 1))
+else:
+    expected_shards = set(range(args.shards))
 
 prefix = "morimori_shard_" if args.scope == "leaf" else "morimori_cat99_shard_"
 
@@ -55,7 +67,10 @@ for shard in range(args.shards):
             data = json.load(f)
     except FileNotFoundError:
         print(f"[merge:{args.scope}] shard {shard}: ファイルなし（スキップ）", flush=True)
-        missing_shards.append(shard)
+        # 期待範囲内の欠損だけを「取りこぼし」として扱う
+        # （leaf-A から見た 20-39 のように、もう一方のワークフロー担当分は正常な不在）
+        if shard in expected_shards:
+            missing_shards.append(shard)
         continue
 
     for jan, item in data.get("items", {}).items():

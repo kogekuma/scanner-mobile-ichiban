@@ -70,7 +70,7 @@ jobs:
         run: git clone --depth=1 https://kogekuma:$PAT@github.com/kogekuma/Scanner.git scanner_repo
 
       - name: Merge leaf shards (incremental — keeps cat99/leaf-A and cancelled-shard data)
-        run: python merge_morimori.py --base scanner_repo/docs/data/morimori.json --scope leaf --shards 40
+        run: python merge_morimori.py --base scanner_repo/docs/data/morimori.json --scope leaf --shards 40 --expect 20-39
 
       - name: Push to Scanner repo
         env:
